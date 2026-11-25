@@ -12,3 +12,8 @@ st.title("My Demo Page")
 name = st.text_input("Enter your name: ")
 
 st.write(f"Hello, {name}")
+
+if st.button("press me"):
+    st.write("Hello buddy")
+
+    
