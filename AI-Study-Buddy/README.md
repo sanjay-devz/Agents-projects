@@ -1,109 +1,98 @@
-# StudyMate – AI Study Buddy
+# StudyMate – AI Study Buddy (Streamlit prototype)
 
-## Overview
-StudyMate is a lightweight web application that helps students study campus courses.  A student provides a **subject**, a **topic**, and the **syllabus material** for that topic.  StudyMate then:
+A minimal, hack‑athon‑ready demo that lets a student paste course material, get a concise explanation with an example, answer five AI‑generated multiple‑choice questions, and receive a score with feedback.
 
-1. Generates a simple explanation with one concrete example based on the supplied material.
-2. Generates **exactly five** multiple‑choice practice questions.
-3. Lets the student answer the questions.
-4. Scores the quiz and gives detailed feedback for any wrong answers.
+## Features (demo‑oriented)
+- Pure **Streamlit** UI – no separate backend or database.
+- All AI calls happen on the server side using a single model (OpenAI, Gemini, etc.).
+- The model is forced to return **JSON**; the app validates that the response contains exactly five questions with four options each.
+- Session state keeps the answer key hidden until the quiz is submitted.
+- Graceful handling when no API key is configured.
 
-The app is built with **plain HTML/CSS/JavaScript** for the frontend and **FastAPI** for the backend.  All AI calls are performed on the server so the API key never leaves the backend.
-
----
-
-## Project Structure
+## Project structure
 ```
 StudyMate/
-├─ api/                     # FastAPI backend (Vercel serverless functions)
-│   ├─ __init__.py
-│   ├─ app.py               # FastAPI entry point
-│   ├─ models.py            # Pydantic request/response models
-│   └─ ai.py                # Wrapper for the AI provider
-├─ public/                  # Front‑end static files served by Vercel
-│   ├─ index.html
-│   ├─ styles.css
-│   └─ script.js
-├─ .gitignore
-├─ .env.example            # Example environment variables
-├─ requirements.txt
-├─ vercel.json              # Vercel configuration
-└─ README.md                # This file
+├─ app.py               # Streamlit app (the whole workflow)
+├─ requirements.txt     # Python dependencies
+├─ .env.example         # Template for credentials
+├─ .gitignore           # Ignores env, venv, caches, etc.
+└─ README.md            # (this file)
 ```
----
 
-## Prerequisites
-* Python 3.10+ (tested with 3.11)
-* A virtual environment tool (`venv` or `conda`)
-* An AI model provider that offers a REST JSON API (e.g., OpenAI, Anthropic, Gemini).  You only need the **API key** and the **base URL**.
-
----
-
-## Local Development
-1. **Clone the repository** (once you have pushed it to GitHub).
-   ```bash
-   git clone <your‑repo‑url>
-   cd StudyMate
-   ```
-2. **Create a virtual environment** and install dependencies.
-   ```bash
-   python -m venv .venv
-   source .venv/bin/activate   # on Windows: .venv\Scripts\activate
-   pip install -r requirements.txt
-   ```
-3. **Copy the example environment file and add your credentials**.
+## 1️⃣ Add your API key
+1. Copy the example file:
    ```bash
    cp .env.example .env
    ```
-   Edit `.env` and set:
+2. Open **`.env`** in a text editor and replace the placeholder values:
+   ```dotenv
+   AI_API_KEY=YOUR_API_KEY_HERE          # OpenAI, Gemini, etc.
+   # For OpenAI use the default URL below, otherwise change it.
+   AI_API_URL=https://api.openai.com/v1/chat/completions
+   GENERATION_MODEL=gpt-4o-mini          # or gemini-1.5-pro, etc.
    ```
-   AI_API_KEY=your‑api‑key
-   AI_API_URL=https://api.your‑provider.com/v1/chat/completions
-   ```
-4. **Run the app locally**
-   ```bash
-   uvicorn api.app:app --reload
-   ```
-   The frontend is served from `public/`.  Open the browser at `http://localhost:8000/public/index.html`.
+   - **OpenAI** example: keep the URL as shown and set `GENERATION_MODEL` to `gpt-4o-mini` (or any model you have access to).
+   - **Gemini** example: replace `AI_API_URL` with something like:
+     ```
+     AI_API_URL=https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro:generateContent
+     GENERATION_MODEL=gemini-1.5-pro
+     ```
+   - Make sure the model name in `GENERATION_MODEL` matches the one in the URL.
+3. Save the file. **Never commit `.env`** – it is listed in `.gitignore`.
 
----
-
-## Running the Tests (optional)
-At the moment the project does not ship automated tests, but you can quickly check that the FastAPI app starts without syntax errors:
+## 2️⃣ Install dependencies
 ```bash
-python -m py_compile $(git ls-files "*.py")
+# From the project root (StudyMate)
+python3 -m venv .venv          # create a virtual environment
+source .venv/bin/activate      # Linux / macOS
+# .venv\Scripts\activate   # Windows PowerShell
+pip install -r requirements.txt
 ```
+The install pulls:
+- `streamlit` – UI framework
+- `httpx` – async‑ready HTTP client for the LLM
+- `python-dotenv` – loads the `.env` file
+
+## 3️⃣ Run the app locally
+```bash
+streamlit run app.py
+```
+A browser window will open at `http://localhost:8501`. You’ll see the **StudyMate** title and the input form.
+
+## 4️⃣ Demo workflow (what to show the judges)
+1. **Enter a subject and topic** – e.g., *Subject: Physics*, *Topic: Newton's Laws*.
+2. **Paste concise course notes** (a short paragraph is enough). The notes are the only knowledge source.
+3. Click **“Start study session.”**
+   - The app calls the LLM, which returns a JSON with an explanation, an example, and five MCQs.
+4. **Explanation & example** appear above the quiz – read them quickly.
+5. **Answer the five questions** using the radio buttons.
+6. Click **“Submit answers.”**
+   - The app scores the quiz, shows the numeric score, the correct answer for any wrong question, and a short explanation of the gap.
+7. Optionally click **“Start a new session”** to repeat with different material.
+
+## 5️⃣ Error handling you might see
+- **Missing API key** – a red warning tells you to add `AI_API_KEY` to `.env`.
+- **HTTP error / rate‑limit** – a Streamlit error box displays the cause (e.g., `401 Unauthorized`).
+- **Invalid LLM response** – the app validates the JSON; if the model returns malformed data you’ll see a friendly error (e.g., “LLM returned a number of questions other than five”).
+
+## 6️⃣ Extending the prototype (optional for later phases)
+- Swap the OpenAI endpoint for Gemini or Anthropic by editing `AI_API_URL` and `GENERATION_MODEL`.
+- Add a simple cache (e.g., `st.cache_data`) for the LLM call if you want faster repeats during a demo.
+- Replace the hard‑coded schema with a Pydantic model for stricter validation.
+
 ---
 
-## Vercel Deployment
-1. **Create a Vercel project** and connect it to the GitHub repository.
-2. **Add the required environment variables** in the Vercel dashboard:
-   * `AI_API_KEY`
-   * `AI_API_URL`
-3. **Deploy** – Vercel automatically detects the `vercel.json` configuration and builds the Python backend as serverless functions.  Static files under `public/` are served directly.
-4. After deployment, the app will be reachable at `https://<your‑project>.vercel.app`.
+### TL;DR commands
+```bash
+# 1️⃣ copy env template and fill it
+cp .env.example .env   # edit .env as described above
 
-### Vercel Compatibility Note
-FastAPI works on Vercel’s Python runtime (currently 3.11).  The backend is placed in the `api/` directory; each `.py` file becomes a serverless function.  The `vercel.json` file maps all files under `api/` to the `python3.11` runtime.  No additional build steps are required.
+# 2️⃣ create & activate venv, install deps
+python3 -m venv .venv
+source .venv/bin/activate   # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
 
----
-
-## How the Backend Works
-* **`/api/start_session`** – receives the subject, topic, and material, calls the AI model to generate an explanation, example, and five MCQs, stores the answer key in memory, and returns the data needed for the frontend.
-* **`/api/submit_answers`** – receives the session ID and the student’s selected options, compares them to the stored answer key, computes a score and per‑question feedback, then returns this information.
-* **`/api/health`** – simple health check used by Vercel and local scripts.
-
-All AI calls request **structured JSON** from the model, and the server validates the response before sending anything to the client.  If the model returns malformed data the server responds with a clear error message.
-
----
-
-## Contributing
-* Fork the repository.
-* Create a feature branch (`git checkout -b feature/awesome‑thing`).
-* Open a Pull Request against `main`.
-* Follow the coding style in the existing files – keep the code beginner‑friendly and well‑commented where the logic is non‑obvious.
-
----
-
-## License
-This project is provided under the MIT License – feel free to use, modify, and share.
+# 3️⃣ run the Streamlit demo
+streamlit run app.py
+```
+Now you can drive the full StudyMate workflow for the judges.

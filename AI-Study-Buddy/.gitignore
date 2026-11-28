@@ -1,15 +1,19 @@
-venv/
+# .gitignore
+# Python cache
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+
+# Virtual environment
+.venv/
+venv/
+
+# Environment variables (keep secret)
 .env
-*.env
-.idea/
+
+# Streamlit cache & config files
+.streamlit/
+
+# OS generated files
 .DS_Store
-*.log
-*.sqlite3
-
-# Vercel build files
-.vercel/
-
-# Node modules (if any)
-node_modules/
+Thumbs.db
