@@ -22,6 +22,82 @@ GENERATION_MODEL = os.getenv("GENERATION_MODEL", "gpt-4o-mini")
 # Helper: call the LLM and ask for JSON output
 # ---------------------------------------------------------------------------
 def call_llm(subject: str, topic: str, material: str) -> dict:
+    """Ask the LLM for an explanation, an example and exactly five MCQs using the Gemini flash curl format.
+    Returns the parsed JSON dict or raises a RuntimeError with a helpful message.
+    """
+    # Build the combined prompt (system + user) as a single text block – Gemini expects a single content string.
+    system_prompt = (
+        "You are an AI tutor that must produce a concise explanation of a topic, "
+        "one concrete example, and exactly five multiple‑choice questions (four options each, one correct). "
+        "All content must be derived **only** from the supplied material. "
+        "If the material is insufficient, respond with a JSON object containing an ``error`` field describing what is missing."
+    )
+    user_prompt = (
+        f"Subject: {subject}\nTopic: {topic}\n\nMaterial:\n{material}\n\n"
+        "Generate JSON with this exact schema:\n"
+        "{\n"
+        "  \"explanation\": string,\n"
+        "  \"example\": string,\n"
+        "  \"questions\": [\n"
+        "    {\n"
+        "      \"id\": string,\n"
+        "      \"question\": string,\n"
+        "      \"options\": [string, string, string, string],\n"
+        "      \"answer\": integer (0‑3),\n"
+        "      \"explanation\": string\n"
+        "    }\n"
+        "  ]\n"
+        "}\n"
+    )
+    # Concatenate prompts – Gemini will treat the whole text as the user request.
+    full_text = system_prompt + "\n\n" + user_prompt
+
+    payload = {
+        "contents": [
+            {
+                "parts": [
+                    {"text": full_text}
+                ]
+            }
+        ]
+    }
+    # Use the header that the curl example uses.
+    headers = {
+        "Content-Type": "application/json",
+        "X-goog-api-key": AI_API_KEY,
+    }
+    try:
+        response = httpx.post(AI_API_URL, json=payload, headers=headers, timeout=30.0)
+        response.raise_for_status()
+    except httpx.HTTPError as exc:
+        raise RuntimeError(f"API request failed: {exc}")
+
+    # Gemini returns the generated text inside candidates[0].content.parts[0].text
+    try:
+        data = response.json()
+        content = data["candidates"][0]["content"]["parts"][0]["text"]
+        result = json.loads(content)
+    except (KeyError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"Invalid Gemini response: {exc}")
+
+    # Validate the JSON structure (same checks as before)
+    if not isinstance(result, dict):
+        raise RuntimeError("LLM did not return a JSON object")
+    if "error" in result:
+        raise RuntimeError(f"LLM error: {result['error']}")
+    required = {"explanation", "example", "questions"}
+    if not required.issubset(result.keys()):
+        raise RuntimeError("Missing one of explanation/example/questions in LLM response")
+    if len(result["questions"]) != 5:
+        raise RuntimeError("LLM returned a number of questions other than five")
+    for q in result["questions"]:
+        if not all(k in q for k in ("id", "question", "options", "answer", "explanation")):
+            raise RuntimeError("A question is missing required keys")
+        if not isinstance(q["options"], list) or len(q["options"]) != 4:
+            raise RuntimeError("Each question must have exactly four options")
+        if not (0 <= q["answer"] <= 3):
+            raise RuntimeError("Answer index out of range (must be 0‑3)")
+    return result
     """Ask the LLM for an explanation, an example and exactly five MCQs.
     Returns the parsed JSON dict or raises a RuntimeError with a helpful message.
     """
