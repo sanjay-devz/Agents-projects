@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>StudyMate – AI Study Buddy</title>
+    <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+    <main class="container">
+        <h1>StudyMate</h1>
+        <p class="subtitle">Your AI‑powered study companion for campus courses.</p>
+
+        <section id="session-form" class="card">
+            <h2>Start a study session</h2>
+            <form id="start-form">
+                <label for="subject">Subject</label>
+                <input type="text" id="subject" name="subject" maxlength="100" required />
+
+                <label for="topic">Topic</label>
+                <input type="text" id="topic" name="topic" maxlength="150" required />
+
+                <label for="material">Course material (paste text)</label>
+                <textarea id="material" name="material" rows="6" maxlength="5000" required></textarea>
+
+                <button type="submit" id="start-btn">Start study session</button>
+                <p id="form-error" class="error" role="alert" aria-live="assertive"></p>
+            </form>
+        </section>
+
+        <section id="study-area" class="card hidden" aria-live="polite">
+            <h2>Explanation</h2>
+            <div id="explanation" class="content"></div>
+            <h3>Example</h3>
+            <div id="example" class="content"></div>
+            <button id="start-quiz-btn">Start quiz</button>
+        </section>
+
+        <section id="quiz-area" class="card hidden" aria-live="polite">
+            <h2>Practice Quiz</h2>
+            <div id="question-container"></div>
+            <button id="submit-quiz-btn" disabled>Submit answers</button>
+            <p id="quiz-error" class="error" role="alert" aria-live="assertive"></p>
+        </section>
+
+        <section id="result-area" class="card hidden" aria-live="polite">
+            <h2>Result</h2>
+            <p id="score"></p>
+            <div id="feedback"></div>
+            <button id="new-session-btn">New study session</button>
+        </section>
+    </main>
+
+    <script src="script.js"></script>
+</body>
+</html>
