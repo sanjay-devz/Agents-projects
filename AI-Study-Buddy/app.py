@@ -1,428 +1,205 @@
-import os
+"""Local Ollama-powered study helper."""
+
 import json
+import os
+import re
+from typing import Any
+
 import httpx
 import streamlit as st
 from dotenv import load_dotenv
 
-# Load environment variables from .env (if present)
+
 load_dotenv()
 
-# ---------------------------------------------------------------------------
-# Configuration – read from environment variables
-# ---------------------------------------------------------------------------
-AI_API_KEY = os.getenv("AI_API_KEY")
-# Default to OpenAI's chat completion endpoint if not overridden
-AI_API_URL = os.getenv(
-    "AI_API_URL", "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
-)
-# Model to use for generation (default works with OpenAI and Gemini style)
-GENERATION_MODEL = os.getenv("GENERATION_MODEL", "gpt-4o-mini")
+OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434").rstrip("/")
+OLLAMA_CHAT_URL = os.getenv("OLLAMA_CHAT_URL", f"{OLLAMA_HOST}/api/chat")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gemma2:latest")
 
-# ---------------------------------------------------------------------------
-# Helper: call the LLM and ask for JSON output
-# ---------------------------------------------------------------------------
-def call_llm(subject: str, topic: str, material: str) -> dict:
-    """Call the local Ollama (or any OpenAI‑compatible) API to get a JSON response.
-    The function builds a system prompt and a user prompt, sends them to the URL
-    defined in ``AI_API_URL`` with the model name ``GENERATION_MODEL``.
-    It expects the model to respect ``response_format: {"type": "json_object"}``
-    and to return a JSON object matching the required schema.
-    """
-    # Prompt construction – same as before
+
+def _extract_json(content: str) -> dict[str, Any]:
+    """Parse a JSON object, allowing a model to wrap it in a markdown fence."""
+    candidate = content.strip()
+    if candidate.startswith("```"):
+        candidate = re.sub(r"^```(?:json)?\s*|\s*```$", "", candidate, flags=re.IGNORECASE)
+    try:
+        result = json.loads(candidate)
+    except json.JSONDecodeError:
+        start, end = candidate.find("{"), candidate.rfind("}")
+        if start < 0 or end <= start:
+            raise RuntimeError("Ollama returned text instead of a JSON quiz. Try generating again.")
+        try:
+            result = json.loads(candidate[start : end + 1])
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"Ollama returned invalid JSON: {exc}") from exc
+    if not isinstance(result, dict):
+        raise RuntimeError("Ollama response must be a JSON object.")
+    return result
+
+
+def _validate_quiz(result: dict[str, Any]) -> dict[str, Any]:
+    if result.get("error"):
+        raise RuntimeError(f"Gemma could not generate a quiz: {result['error']}")
+    for field in ("explanation", "example"):
+        if not isinstance(result.get(field), str) or not result[field].strip():
+            raise RuntimeError(f"Gemma response is missing a valid '{field}' string.")
+
+    questions = result.get("questions")
+    if not isinstance(questions, list) or len(questions) != 5:
+        raise RuntimeError("Gemma must return exactly five questions.")
+
+    ids: set[str] = set()
+    for index, question in enumerate(questions, start=1):
+        if not isinstance(question, dict):
+            raise RuntimeError(f"Question {index} must be a JSON object.")
+        for field in ("id", "question", "explanation"):
+            if not isinstance(question.get(field), str) or not question[field].strip():
+                raise RuntimeError(f"Question {index} is missing a valid '{field}' string.")
+        question_id = question["id"]
+        if question_id in ids:
+            raise RuntimeError("Gemma returned duplicate question IDs.")
+        ids.add(question_id)
+        options = question.get("options")
+        if (
+            not isinstance(options, list)
+            or len(options) != 4
+            or any(not isinstance(option, str) or not option.strip() for option in options)
+        ):
+            raise RuntimeError(f"Question {index} must have four non-empty text options.")
+        answer = question.get("answer")
+        if isinstance(answer, bool) or not isinstance(answer, int) or not 0 <= answer < 4:
+            raise RuntimeError(f"Question {index} has an invalid answer index (expected 0–3).")
+    return result
+
+
+def call_ollama(subject: str, topic: str, material: str) -> dict[str, Any]:
+    """Generate and validate a five-question quiz through local Ollama."""
     system_prompt = (
-        "You are an AI tutor that must produce a concise explanation of a topic, "
-        "one concrete example, and exactly five multiple‑choice questions (four options each, one correct). "
-        "All content must be derived **only** from the supplied material. "
-        "If the material is insufficient, respond with a JSON object containing an `error` field describing what is missing."
+        "You are a careful study tutor. Use only the supplied study material. "
+        "Return one JSON object with explanation (string), example (string), and "
+        "questions (an array of exactly five objects). Each question must have "
+        "id (unique string), question (string), options (exactly four strings), "
+        "answer (zero-based integer from 0 to 3), and explanation (string). "
+        "If the material is insufficient, return {\"error\":\"...\"}. "
+        "Do not include markdown or text outside the JSON object."
     )
     user_prompt = (
-        f"Subject: {subject}\nTopic: {topic}\n\nMaterial:\n{material}\n\n"
-        "Generate JSON with this exact schema:\n"
-        "{\n"
-        "  \"explanation\": string,\n"
-        "  \"example\": string,\n"
-        "  \"questions\": [\n"
-        "    {\n"
-        "      \"id\": string,\n"
-        "      \"question\": string,\n"
-        "      \"options\": [string, string, string, string],\n"
-        "      \"answer\": integer (0‑3),\n"
-        "      \"explanation\": string\n"
-        "    }\n"
-        "  ]\n"
-        "}\n"
+        f"Subject: {subject.strip()}\nTopic: {topic.strip()}\n\n"
+        f"Study material:\n{material.strip()}\n\nGenerate the explanation, example, and quiz now."
     )
     payload = {
-        "model": GENERATION_MODEL,
+        "model": OLLAMA_MODEL,
+        "stream": False,
+        "format": "json",
+        "options": {"temperature": 0.2},
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ],
-        "temperature": 0.2,
-        "response_format": {"type": "json_object"},
     }
-    # Build headers – include Authorization only if an API key is provided
-    headers = {"Content-Type": "application/json"}
-    if AI_API_KEY:
-        headers["Authorization"] = f"Bearer {AI_API_KEY}"
     try:
-        response = httpx.post(AI_API_URL, json=payload, headers=headers, timeout=30.0)
+        response = httpx.post(OLLAMA_CHAT_URL, json=payload, timeout=300.0)
         response.raise_for_status()
+    except httpx.ConnectError as exc:
+        raise RuntimeError(
+            f"Cannot reach Ollama at {OLLAMA_HOST}. Start Ollama locally, then try again."
+        ) from exc
+    except httpx.TimeoutException as exc:
+        raise RuntimeError("Ollama took too long to respond. Check that the local model is running and try again.") from exc
+    except httpx.HTTPStatusError as exc:
+        detail = exc.response.text[:500]
+        if exc.response.status_code == 404:
+            raise RuntimeError(
+                f"Ollama could not find model '{OLLAMA_MODEL}'. Pull it with `ollama pull {OLLAMA_MODEL}`."
+            ) from exc
+        raise RuntimeError(f"Ollama returned HTTP {exc.response.status_code}: {detail}") from exc
     except httpx.HTTPError as exc:
-        raise RuntimeError(f"API request failed: {exc}")
-    try:
-        data = response.json()
-        # OpenAI‑compatible response format
-        content = data["choices"][0]["message"]["content"]
-        result = json.loads(content)
-    except (KeyError, json.JSONDecodeError) as exc:
-        raise RuntimeError(f"Invalid response format from LLM: {exc}")
-    # Basic validation – same as before
-    if not isinstance(result, dict):
-        raise RuntimeError("LLM did not return a JSON object")
-    if "error" in result:
-        raise RuntimeError(f"LLM error: {result['error']}")
-    required = {"explanation", "example", "questions"}
-    if not required.issubset(result.keys()):
-        raise RuntimeError("Missing one of explanation/example/questions in LLM response")
-    if len(result["questions"]) != 5:
-        raise RuntimeError("LLM returned a number of questions other than five")
-    for q in result["questions"]:
-        if not all(k in q for k in ("id", "question", "options", "answer", "explanation")):
-            raise RuntimeError("A question is missing required keys")
-        if not isinstance(q["options"], list) or len(q["options"]) != 4:
-            raise RuntimeError("Each question must have exactly four options")
-        if not (0 <= q["answer"] <= 3):
-            raise RuntimeError("Answer index out of range (must be 0‑3)")
-    return result
-    """Call the local Ollama (or any OpenAI‑compatible) API to get a JSON response.
-    The function builds a system prompt and a user prompt, sends them to the URL
-    defined in ``AI_API_URL`` with the model name ``GENERATION_MODEL``.
-    It expects the model to respect ``response_format: {"type": "json_object"}``
-    and to return a JSON object matching the required schema.
-    """
-    # Prompt construction – same as before
-    system_prompt = (
-        "You are an AI tutor that must produce a concise explanation of a topic, "
-        "one concrete example, and exactly five multiple‑choice questions (four options each, one correct). "
-        "All content must be derived **only** from the supplied material. "
-        "If the material is insufficient, respond with a JSON object containing an `error` field describing what is missing."
-    )
-    user_prompt = (
-        f"Subject: {subject}\nTopic: {topic}\n\nMaterial:\n{material}\n\n"
-        "Generate JSON with this exact schema:\n"
-        "{\n"
-        "  \"explanation\": string,\n"
-        "  \"example\": string,\n"
-        "  \"questions\": [\n"
-        "    {\n"
-        "      \"id\": string,\n"
-        "      \"question\": string,\n"
-        "      \"options\": [string, string, string, string],\n"
-        "      \"answer\": integer (0‑3),\n"
-        "      \"explanation\": string\n"
-        "    }\n"
-        "  ]\n"
-        "}\n"
-    )
-    payload = {
-        "model": GENERATION_MODEL,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-        "temperature": 0.2,
-        "response_format": {"type": "json_object"},
-    }
-    # Build headers – include Authorization only if an API key is provided
-    headers = {"Content-Type": "application/json"}
-    if AI_API_KEY:
-        headers["Authorization"] = f"Bearer {AI_API_KEY}"
-    try:
-        response = httpx.post(AI_API_URL, json=payload, headers=headers, timeout=30.0)
-        response.raise_for_status()
-    except httpx.HTTPError as exc:
-        raise RuntimeError(f"API request failed: {exc}")
-    try:
-        data = response.json()
-        content = data["choices"][0]["message"]["content"]
-        result = json.loads(content)
-    except (KeyError, json.JSONDecodeError) as exc:
-        raise RuntimeError(f"Invalid response format from LLM: {exc}")
-    # Basic validation – same as before
-    if not isinstance(result, dict):
-        raise RuntimeError("LLM did not return a JSON object")
-    if "error" in result:
-        raise RuntimeError(f"LLM error: {result['error']}")
-    required = {"explanation", "example", "questions"}
-    if not required.issubset(result.keys()):
-        raise RuntimeError("Missing one of explanation/example/questions in LLM response")
-    if len(result["questions"]) != 5:
-        raise RuntimeError("LLM returned a number of questions other than five")
-    for q in result["questions"]:
-        if not all(k in q for k in ("id", "question", "options", "answer", "explanation")):
-            raise RuntimeError("A question is missing required keys")
-        if not isinstance(q["options"], list) or len(q["options"]) != 4:
-            raise RuntimeError("Each question must have exactly four options")
-        if not (0 <= q["answer"] <= 3):
-            raise RuntimeError("Answer index out of range (must be 0‑3)")
-    return result
-    """Ask the LLM for an explanation, an example and exactly five MCQs using the Gemini flash curl format.
-    Returns the parsed JSON dict or raises a RuntimeError with a helpful message.
-    """
-    # Build the combined prompt (system + user) as a single text block – Gemini expects a single content string.
-    system_prompt = (
-        "You are an AI tutor that must produce a concise explanation of a topic, "
-        "one concrete example, and exactly five multiple‑choice questions (four options each, one correct). "
-        "All content must be derived **only** from the supplied material. "
-        "If the material is insufficient, respond with a JSON object containing an ``error`` field describing what is missing."
-    )
-    user_prompt = (
-        f"Subject: {subject}\nTopic: {topic}\n\nMaterial:\n{material}\n\n"
-        "Generate JSON with this exact schema:\n"
-        "{\n"
-        "  \"explanation\": string,\n"
-        "  \"example\": string,\n"
-        "  \"questions\": [\n"
-        "    {\n"
-        "      \"id\": string,\n"
-        "      \"question\": string,\n"
-        "      \"options\": [string, string, string, string],\n"
-        "      \"answer\": integer (0‑3),\n"
-        "      \"explanation\": string\n"
-        "    }\n"
-        "  ]\n"
-        "}\n"
-    )
-    # Concatenate prompts – Gemini will treat the whole text as the user request.
-    full_text = system_prompt + "\n\n" + user_prompt
-
-    payload = {
-        "contents": [
-            {
-                "parts": [
-                    {"text": full_text}
-                ]
-            }
-        ]
-    }
-    # Use the header that the curl example uses.
-    headers = {
-        "Content-Type": "application/json",
-        "X-goog-api-key": AI_API_KEY,
-    }
-    try:
-        response = httpx.post(AI_API_URL, json=payload, headers=headers, timeout=30.0)
-        response.raise_for_status()
-    except httpx.HTTPError as exc:
-        raise RuntimeError(f"API request failed: {exc}")
-
-    # Gemini returns the generated text inside candidates[0].content.parts[0].text
-    try:
-        data = response.json()
-        content = data["candidates"][0]["content"]["parts"][0]["text"]
-        result = json.loads(content)
-    except (KeyError, json.JSONDecodeError) as exc:
-        raise RuntimeError(f"Invalid Gemini response: {exc}")
-
-    # Validate the JSON structure (same checks as before)
-    if not isinstance(result, dict):
-        raise RuntimeError("LLM did not return a JSON object")
-    if "error" in result:
-        raise RuntimeError(f"LLM error: {result['error']}")
-    required = {"explanation", "example", "questions"}
-    if not required.issubset(result.keys()):
-        raise RuntimeError("Missing one of explanation/example/questions in LLM response")
-    if len(result["questions"]) != 5:
-        raise RuntimeError("LLM returned a number of questions other than five")
-    for q in result["questions"]:
-        if not all(k in q for k in ("id", "question", "options", "answer", "explanation")):
-            raise RuntimeError("A question is missing required keys")
-        if not isinstance(q["options"], list) or len(q["options"]) != 4:
-            raise RuntimeError("Each question must have exactly four options")
-        if not (0 <= q["answer"] <= 3):
-            raise RuntimeError("Answer index out of range (must be 0‑3)")
-    return result
-    """Ask the LLM for an explanation, an example and exactly five MCQs.
-    Returns the parsed JSON dict or raises a RuntimeError with a helpful message.
-    """
-    system_prompt = (
-        "You are an AI tutor that must produce a concise explanation of a topic, "
-        "one concrete example, and exactly five multiple‑choice questions (four options each, one correct). "
-        "All content must be derived **only** from the supplied material. "
-        "If the material is insufficient, respond with a JSON object containing an "
-        "`error` field describing what is missing."
-    )
-    user_prompt = (
-        f"Subject: {subject}\nTopic: {topic}\n\nMaterial:\n{material}\n\n"
-        "Generate JSON with this exact schema:\n"
-        "{\n"
-        "  \"explanation\": string,\n"
-        "  \"example\": string,\n"
-        "  \"questions\": [\n"
-        "    {\n"
-        "      \"id\": string,\n"
-        "      \"question\": string,\n"
-        "      \"options\": [string, string, string, string],\n"
-        "      \"answer\": integer (0‑3),\n"
-        "      \"explanation\": string\n"
-        "    }\n"
-        "  ]\n"
-        "}\n"
-    )
-    payload = {
-        "model": GENERATION_MODEL,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-        "temperature": 0.2,
-        "response_format": {"type": "json_object"},
-    }
-    headers = {
-        "Authorization": f"Bearer {AI_API_KEY}",
-        "Content-Type": "application/json",
-    }
-    try:
-        response = httpx.post(AI_API_URL, json=payload, headers=headers, timeout=30.0)
-        response.raise_for_status()
-    except httpx.HTTPError as exc:
-        raise RuntimeError(f"API request failed: {exc}")
+        raise RuntimeError(f"Ollama request failed: {exc}") from exc
 
     try:
-        data = response.json()
-        # OpenAI‑style response; for other providers adapt accordingly
-        content = data["choices"][0]["message"]["content"]
-        result = json.loads(content)
-    except (KeyError, json.JSONDecodeError) as exc:
-        raise RuntimeError(f"Invalid response format from LLM: {exc}")
+        response_data = response.json()
+        content = response_data["message"]["content"]
+    except (ValueError, KeyError, TypeError) as exc:
+        raise RuntimeError("Ollama returned an unexpected response. Check the local Ollama server.") from exc
+    if not isinstance(content, str):
+        raise RuntimeError("Ollama returned an empty or invalid message.")
+    return _validate_quiz(_extract_json(content))
 
-    # Basic validation of required fields
-    if not isinstance(result, dict):
-        raise RuntimeError("LLM did not return a JSON object")
-    if "error" in result:
-        raise RuntimeError(f"LLM error: {result['error']}")
-    required = {"explanation", "example", "questions"}
-    if not required.issubset(result.keys()):
-        raise RuntimeError("Missing one of explanation/example/questions in LLM response")
-    if len(result["questions"]) != 5:
-        raise RuntimeError("LLM returned a number of questions other than five")
-    for q in result["questions"]:
-        if not all(k in q for k in ("id", "question", "options", "answer", "explanation")):
-            raise RuntimeError("A question is missing required keys")
-        if not isinstance(q["options"], list) or len(q["options"]) != 4:
-            raise RuntimeError("Each question must have exactly four options")
-        if not (0 <= q["answer"] <= 3):
-            raise RuntimeError("Answer index out of range (must be 0‑3)")
-    return result
 
-# ---------------------------------------------------------------------------
-# Streamlit UI
-# ---------------------------------------------------------------------------
-st.set_page_config(page_title="StudyMate – AI Study Buddy", layout="centered")
-st.title("📚 StudyMate – AI Study Buddy")
+st.set_page_config(page_title="Study Buddy", page_icon="📚", layout="centered")
+st.title("Study Buddy")
+st.caption(f"Local AI quiz generator · Ollama · {OLLAMA_MODEL}")
 
-if not AI_API_URL:
-    st.warning(
-        "🚨 No API URL detected. Add `AI_API_URL=http://localhost:11434/v1/chat/completions` to a `.env` file in the project root."
-    )
-    st.stop()
+st.session_state.setdefault("study_result", None)
+st.session_state.setdefault("quiz_submitted", False)
+st.session_state.setdefault("quiz_score", None)
 
-# ---------------------------------------------------------------
-# Session state initialization
-# ---------------------------------------------------------------
-if "stage" not in st.session_state:
-    st.session_state.stage = "input"  # other values: "quiz", "result"
-if "generation" not in st.session_state:
-    st.session_state.generation = {}
-if "answers" not in st.session_state:
-    st.session_state.answers = {}
+with st.form("study_form"):
+    subject = st.text_input("Subject", value="Physics", max_chars=100)
+    topic = st.text_input("Topic", value="Newton's Laws", max_chars=150)
+    material = st.text_area("Study material", height=200, max_chars=20000)
+    generate = st.form_submit_button("Generate study guide")
 
-# ---------------------------------------------------------------
-# Stage: Input form
-# ---------------------------------------------------------------
-if st.session_state.stage == "input":
-    with st.form(key="study_form"):
-        subject = st.text_input("Subject", max_chars=100)
-        topic = st.text_input("Topic", max_chars=150)
-        material = st.text_area(
-            "Course notes / syllabus material",
-            height=200,
-            max_chars=5000,
-        )
-        submit = st.form_submit_button("Start study session")
-        if submit:
-            if not subject or not topic or not material:
-                st.error("Please fill in all fields.")
-            else:
-                with st.spinner("Generating explanation and quiz…"):
-                    try:
-                        result = call_llm(subject, topic, material)
-                        st.session_state.generation = result
-                        # Build a simple answer key dict for later scoring
-                        st.session_state.answer_key = {
-                            q["id"]: q["answer"] for q in result["questions"]
-                        }
-                        st.session_state.stage = "quiz"
-                    except RuntimeError as err:
-                        st.error(str(err))
+if generate:
+    if not subject.strip() or not topic.strip() or not material.strip():
+        st.error("Enter a subject, topic, and study material before generating a quiz.")
+    else:
+        with st.spinner(f"Asking local Gemma model ({OLLAMA_MODEL}) to prepare your study guide…"):
+            try:
+                result = call_ollama(subject, topic, material)
+                old_result = st.session_state.get("study_result")
+                if old_result:
+                    for question in old_result["questions"]:
+                        st.session_state.pop(f"answer_{question['id']}", None)
+                st.session_state.study_result = result
+                st.session_state.quiz_submitted = False
+                st.session_state.quiz_score = None
+            except RuntimeError as exc:
+                st.error(str(exc))
 
-# ---------------------------------------------------------------
-# Stage: Quiz
-# ---------------------------------------------------------------
-elif st.session_state.stage == "quiz":
-    gen = st.session_state.generation
+result = st.session_state.study_result
+if result:
     st.subheader("Explanation")
-    st.write(gen["explanation"])
+    st.write(result["explanation"])
     st.subheader("Example")
-    st.write(gen["example"])
-    st.subheader("Quiz – answer the five questions")
-    with st.form(key="quiz_form"):
-        for idx, q in enumerate(gen["questions"]):
-            st.write(f"**Q{idx + 1}: {q['question']}**")
-            choice = st.radio(
-                f"options_{q['id']}",
-                options=[f"{i + 1}. {opt}" for i, opt in enumerate(q["options"])],
+    st.write(result["example"])
+    st.subheader("Quiz")
+    with st.form("quiz_form"):
+        for index, question in enumerate(result["questions"], start=1):
+            st.markdown(f"**{index}. {question['question']}**")
+            st.radio(
+                f"Answer to question {index}",
+                question["options"],
                 index=None,
-                key=f"radio_{q['id']}",
+                key=f"answer_{question['id']}",
+                label_visibility="collapsed",
             )
-            # Store the selected index (0‑based) when the form is submitted
-            st.session_state.answers[q["id"]] = (
-                int(choice.split(".")[0]) - 1 if choice else None
-            )
-        quiz_submit = st.form_submit_button("Submit answers")
-        if quiz_submit:
-            # Validate that all questions were answered
-            if any(v is None for v in st.session_state.answers.values()):
-                st.error("Please answer every question before submitting.")
-            else:
-                st.session_state.stage = "result"
+        submitted = st.form_submit_button("Submit answers")
 
-# ---------------------------------------------------------------
-# Stage: Result
-# ---------------------------------------------------------------
-elif st.session_state.stage == "result":
-    gen = st.session_state.generation
-    key = st.session_state.answer_key
-    user_ans = st.session_state.answers
-    total = len(key)
-    correct = sum(1 for qid, ans in user_ans.items() if ans == key[qid])
-    st.subheader(f"Score: {correct} / {total}")
-    st.write("---")
-    for q in gen["questions"]:
-        qid = q["id"]
-        user_choice = user_ans[qid]
-        correct_choice = key[qid]
-        is_correct = user_choice == correct_choice
-        st.write(f"**{q['question']}**")
-        st.write(f"Your answer: {q['options'][user_choice]}")
-        if not is_correct:
-            st.write(f"**Correct answer:** {q['options'][correct_choice]}")
-            st.write(f"Explanation: {q['explanation']}")
-        st.write("---")
-    if st.button("Start a new session"):
-        # Reset everything
-        for k in ["stage", "generation", "answers", "answer_key"]:
-            if k in st.session_state:
-                del st.session_state[k]
-        st.experimental_rerun()
+    if submitted:
+        missing = [
+            index
+            for index, question in enumerate(result["questions"], start=1)
+            if st.session_state.get(f"answer_{question['id']}") is None
+        ]
+        if missing:
+            st.warning("Answer all five questions before submitting.")
+        else:
+            score = sum(
+                st.session_state[f"answer_{question['id']}"] == question["options"][question["answer"]]
+                for question in result["questions"]
+            )
+            st.session_state.quiz_score = score
+            st.session_state.quiz_submitted = True
+
+    if st.session_state.quiz_submitted:
+        st.success(f"You scored {st.session_state.quiz_score}/5")
+        st.subheader("Answer review")
+        for index, question in enumerate(result["questions"], start=1):
+            selected = st.session_state[f"answer_{question['id']}"]
+            correct = question["options"][question["answer"]]
+            st.markdown(f"**{index}. {question['question']}**")
+            st.write(f"Your answer: {selected}")
+            if selected != correct:
+                st.write(f"Correct answer: {correct}")
+            st.caption(question["explanation"])
