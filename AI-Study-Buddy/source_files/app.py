@@ -12,9 +12,9 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434").rstrip("/")
-OLLAMA_CHAT_URL = os.getenv("OLLAMA_CHAT_URL", f"{OLLAMA_HOST}/api/chat")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gemma2:latest")
+# OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434").rstrip("/")
+# OLLAMA_CHAT_URL = os.getenv("OLLAMA_CHAT_URL", f"{OLLAMA_HOST}/api/chat")
+# OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gemma2:latest")
 
 
 def _extract_json(content: str) -> dict[str, Any]:
